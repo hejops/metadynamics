@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# set -x
+set -euo pipefail
+
+# make slurm submission scripts from any directory
+# directory should only contain 1 .gro file (bound/unbound)
+
+GRO=$(find * -name '*.gro' -print)
+if [[ $(<<< "$GRO" wc -l) -gt 1 ]]; then
+	GRO=$(<<< "$GRO" grep 'em100' | grep -iv cg)
+fi
+
+# TODO: bring in select_file once tested
+
+# pass="$(cat "$HOME/gromacs/pass")" 
+pass="$HOME/gromacs/pass" 
+
+select_file() {
+	ext=$1
+	if [[ $ext == plumed ]]; then
+		pat="$ext*"
+		result=$(find * -name "$pat" -print | grep -Pv '_[bu][_.]')
+	else
+		pat="*.$ext"
+		result=$(find * -name "$pat" -print)
+	fi
+
+	if [[ $(<<< "$result" wc -l) -gt 1 ]]; then
+		<<< "$result" fzf --prompt="Choose $ext file"
+	else
+		echo "$result"
+	fi
+}
+
+TOP=$(select_file top)
+MDP=$(select_file mdp)
+PLU=$(select_file plumed)
+PLU_BASE=${PLU%.*}
+CV=$(<<< "$PLU_BASE" awk -F_ '{print $NF}')
+
+# # select .top file; there should only be one
+# TOP=$(find * -name '*.top' -print)
+# if [[ $(<<< "$TOP" wc -l) -gt 1 ]]; then
+# 	TOP=$(<<< "$TOP" fzf --prompt="Choose top file")
+# fi
+
+# # select .mdp file; there should only be one (NPT or MD)
+# MDP=$(find * -name '*.mdp' -print)
+# if [[ $(<<< "$MDP" wc -l) -gt 1 ]]; then
+# 	MDP=$(<<< "$MDP" fzf --prompt="Choose mdp file")
+# fi
+
+# # TODO: more sanity checks
+
+# # there should only be one plumed.dat
+# # make 2 copies (for bound/unbound)
+# PLU=$(find * -name 'plumed*' -print)
+# if [[ $(<<< "$PLU" wc -l) -gt 1 ]]; then
+# 	PLU=$(<<< "$PLU" fzf --prompt="Choose plumed file")
+# fi
+# PLU_BASE=${PLU%.*}
+# CV=$(<<< "$PLU_BASE" awk -F_ '{print $NF}')
+
+# HASH=$(md5sum "*.gro" | cut -c-7)
+
+# TODO: gather hashes of .gro files, include in TARGET
+
+# HASH=$(md5sum "*.gro" | cut -c-7)
+# TARGET="$(date -I)_${BASE}_$HASH" # 2021-04-28_xxx_f0766cb
+NAME=$(basename "$(pwd)")
+[[ $NAME != *_unbound ]] && NAME=${NAME}_bound
+TARGET="$(date -I)_${NAME}_${CV}"
+
+cat <<EOF
+dir $TARGET
+top $TOP
+mdp $MDP
+plu $PLU
+EOF
+
+cat <<EOF > submit.sh
+#!/bin/bash -e
+module load slurm_setup
+module load gromacs/2019-plumed
+module list
+
+EOF
+chmod +x submit.sh
+
+# prepare sbatch script for each gro file and cluster
+# sbatch will stop processing further #SBATCH directives once the first
+# non-comment non-whitespace line has been reached in the script.
+#
+# currently only one mdrun per sbatch
+# TODO: support for more mdruns will be added later
+
+# BASE=${GRO%.*}
+BASE=$(<<< "$GRO" grep -Po '^.+em100')
+
+# TODO: determine this from pdb instead?
+if [[ $(pwd) == *_unbound ]]; then
+	FORM=u
+else
+	FORM=b
+fi
+
+for CLUSTER in {tiny,std}; do
+
+	sed "s/COLVAR/COLVAR_${FORM}_${CLUSTER}/g" "$PLU" > "${PLU_BASE}_${FORM}_${CLUSTER}.dat"
+
+	OUTNAME=${BASE}_${FORM}_${CLUSTER}
+	# system too small -> nodes=1
+
+# std and tiny have slightly different sbatch settings
+if [[ $CLUSTER == std ]]; then
+	CLUSTER_SETTINGS="#SBATCH --clusters=cm2
+#SBATCH --partition=cm2_$CLUSTER
+#SBATCH --qos=cm2_$CLUSTER"
+else
+	CLUSTER_SETTINGS="#SBATCH --clusters=cm2_$CLUSTER"
+fi
+
+cat <<EOF > "$OUTNAME.sh"
+#!/bin/bash -e
+#SBATCH -J $TARGET
+#SBATCH -D $LRZ_SCRATCH_PATH/$TARGET
+#SBATCH -o $LRZ_SCRATCH_PATH/$TARGET/%j.gromacs.out
+
+#SBATCH --export=none
+#SBATCH --get-user-env
+#SBATCH --mail-type=end
+#SBATCH --mail-user=$EMAIL
+#SBATCH --nodes=4
+#SBATCH --ntasks-per-node=28
+#SBATCH --time=72:00:00
+
+$CLUSTER_SETTINGS
+
+module load slurm_setup
+module load gromacs/2019-plumed
+# module list
+
+mpiexec gmx mdrun -v -plumed "${PLU_BASE}_${FORM}_${CLUSTER}.dat" -deffnm ${OUTNAME}
+EOF
+
+echo "Created $OUTNAME.sh"
+
+cat <<EOF >> submit.sh
+gmx grompp -maxwarn 999 -f "$MDP" -c "$GRO" -p "$TOP" -r "$GRO" -o "$OUTNAME.tpr"
+sbatch $OUTNAME.sh
+
+EOF
+
+done
+
+echo "# plumed file used: ${PLU_BASE}" >> submit.sh
+
+# make dir in copy to lrz
+# TODO: limit files to be copied
+# .sh
+# template pdb
+# gro
+# forcefield?
+
+lrzid="$LRZ_LOGIN"
+scratch="$LRZ_SCRATCH_PATH/"
+sshpass -f "$pass" rsync -vLau ./* "$lrzid:$scratch/$TARGET"
+# notify-send "Copy done"
+
+cat <<EOF
+After login, run:
+	./submit.sh
+EOF
+
+sshpass -f "$pass" ssh -Y lxlogin2.lrz.de -l $LRZ_ID -t "cd $LRZ_SCRATCH_PATH/$TARGET; bash --login"
+# ssh -Y lxlogin2.lrz.de -l $LRZ_ID -t "cd $LRZ_SCRATCH_PATH/$TARGET; bash submit.sh"

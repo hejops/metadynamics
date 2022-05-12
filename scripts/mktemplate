@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") GRO
+	Create PDB template for a .gro file
+EOF
+	exit
+}
+
+[[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+gro=$1
+tmp=${gro/.gro/_template.gro}
+pdb=${gro/.gro/_template.pdb}
+
+lines=$(grep <"$gro" -P '\dD' | grep -v H)
+
+cat <<EOF >"$tmp"
+Template
+$(wc <<<"$lines" -l)
+$lines
+$(tail <"$gro" -n1)
+EOF
+
+gmx_mpi editconf -f "$tmp" -o "$pdb"
+echo "Generated $pdb"

@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail +o history
+
+# since PDB/VMD resolution is much lower than HILLS,
+# don't expect VMD to give best distances;
+# use findframes.sh for that instead!
+# this is just used to list the most best frames to check in VMD
+
+pdb=$1
+
+# md450_tiny_1_molcenter.pdb
+# fes450_tiny_1.dat
+fes=$(<<< $pdb sed -r 's|md(.+)_molcenter\.pdb|fes\1.min|g')
+out=$(<<< $pdb sed -r 's|md(.+)_molcenter\.pdb|fes\1.vmd|g')
+conf=$(<<< $pdb sed -r 's|(md.+)_molcenter\.pdb|\1.confvmd|g')
+# echo $conf
+# exit
+
+# [[ $fes = *dat ]] && fes=${fes/dat/min}
+
+getdistances() {
+	vmd -dispdev none -e <(echo "puts [measure bond {$1 $2} frame all]; exit") $pdb 2>/dev/null | grep -P '^\d' | tr ' ' '\n' | grep -n .
+}
+
+allatoms=$(grep ATOMS plumed_WORKING???.dat | grep -Po '\d{2,}' | sort -uV)
+a1=$(sed -n 1p <<< "$allatoms")
+a2=$(sed -n 2p <<< "$allatoms")
+((a1-=1))
+((a2-=1))
+
+if [[ -f "$out" ]]; then
+	echo "Reading distances from $out"
+else
+	echo "Scanning $pdb for minimum distances"
+	# this is according to the plumed file!
+	# TODO: grep the plumed to ensure numbers are input correctly
+
+	if [[ $(<<< "$allatoms" wc -l) -eq 3 ]]; then
+		a3=$(sed -n 3p <<< "$allatoms")
+		((a3-=1))
+		d1s=$(getdistances $a2 $a3)
+		d2s=$(getdistances $a1 $a3)
+		# head <<< "$d1s"
+		# head <<< "$d2s"
+		paste -d: <(echo "$d1s") <(echo "$d2s" | cut -d: -f2) | tr ':' '\t' > $out
+	else
+		d1s=$(getdistances $a1 $a2)
+		<<< "$d1s" tr ':' '\t' > "$out"
+	fi
+fi
+
+# cat "$out"
+echo "$a1 $a2"
+# exit
+
+ref_d1=$(< "$fes" cut -d' ' -f2) # | grep -Po '^\d+\.\d')
+ref_d2=$(< "$fes" cut -d' ' -f3) # | grep -Po '^\d+\.\d')
+
+echo "Found distances: $ref_d1, $ref_d2"
+
+# distances are reversed in vmd for some reason
+# idk why the tab isn't naturally printed before $0; whatever, it works
+# i also have no idea why piping from sort to head fails
+frames=$(< "$out" gawk '{print ($2-'"${ref_d1}"')^2+($3-'"${ref_d2}"')^2 "\t" $0}' | sort -g)
+
+echo "Found frames"
+head -n10 <<< "$frames" | tee "$conf"
+
+# TODO: get the closest frame to the .conf, then overwrite it
+
+# f=$(<<< "$frames" head -n1 | cut -f2)
+
+# f=$((f-=1))
+# echo "animate goto $f" > "$conf"
+
+# tends to give different "best" frame from findframes (which scans the HILLS file)
+# best FES energy is assumed to give best distances
+# thus these are assumed to lead to best frame in VMD

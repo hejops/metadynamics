@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	Kill a frozen mdrun
+	Often required after LINCS issues, because gmx does not actually kill
+	the process
+EOF
+	exit
+}
+
+[[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+# TODO: check if job running; possibly via mtime?
+grep <$1.log pid | tail -n1 | awk '{print $4}' | xargs kill -9

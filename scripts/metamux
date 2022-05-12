@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	Run multiple
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+# https://gist.github.com/flxai/d167ccba12497f7b45918be3393759ae
+
+cd /scratch/$(whoami)/ckit_testing
+
+# Session name
+s=exp
+
+if tmux has-session -t $s 2>/dev/null; then
+	echo "Session '$s' exists already, bailing out!"
+	exit 1
+fi
+
+tmux new -ds $s
+tmux set-option remain-on-exit on
+# FIXME Use something like read at the end of the command instead
+
+COMMANDS=(
+
+	# first cmd is never actually run, idk why
+	# but at least you get an open shell to do stuff in
+	"ls"
+
+	# TODO: accept stdin/file
+	"gmx_mpi mdrun -v -plumed ./plumed_ckit_dist_metad_db3_du3.dat  -deffnm db3_du3 -gpu_id 0 -ntomp 8 -pin on -pinoffset 0"
+	"gmx_mpi mdrun -v -plumed ./plumed_ckit_stack_metad_sb3_su3.dat -deffnm sb3_su3 -gpu_id 0 -ntomp 8 -pin auto"
+	"gmx_mpi mdrun -v -plumed ./plumed_ckit_coord_metad_cb4_cu4.dat -deffnm cb4_cu4 -gpu_id 0 -ntomp 8 -pin auto"
+	"gmx_mpi mdrun -v -plumed ./plumed_ckit_dist_metad_db4_du4.dat  -deffnm db4_du4 -gpu_id 1 -ntomp 8 -pin auto"
+	"gmx_mpi mdrun -v -plumed ./plumed_ckit_stack_metad_sb4_su4.dat -deffnm sb4_su4 -gpu_id 1 -ntomp 8 -pin auto"
+	"gmx_mpi mdrun -v -plumed ./plumed_ckit_coord_metad_cb5_cu5.dat -deffnm cb5_cu5 -gpu_id 1 -ntomp 8 -pin auto"
+
+	"watch -n 2 \"find . -name '*log' -printf '%T+ %p\n' | sort | cut -d' ' -f2 | xargs tail -n2\""
+	"watch -n 2 \"ls -lthr\""
+
+	"top"
+	"nvidia-smi -l 5"
+)
+
+n=${#COMMANDS[@]}
+n=$((n - 1))
+
+for i in $(seq 0 $n); do
+	cmd=${COMMANDS[$i]}
+	tmux split-window "$cmd"
+	if [[ $cmd == *gmx* ]]; then
+		echo "Started job $i: $cmd"
+		echo "Waiting 3 seconds..."
+		sleep 3 # to avoid core mismanagement
+	fi
+	tmux select-layout tiled
+done
+
+tmux kill-pane -t 1
+tmux select-layout tiled
+tmux attach

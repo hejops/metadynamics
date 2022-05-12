@@ -1,0 +1,164 @@
+# vim:ft=plumed
+# https://www.plumed-nest.org/eggs/20/025/data/OAH_G1/plumed.dat.html
+# https://www.plumed.org/doc-v2.7/user-doc/html/glossary.html
+# OPES: https://www.plumed.org/doc-v2.7/user-doc/html/_o_p_e_s.html
+# libtorch: https://colab.research.google.com/drive/1dG0ohT75R-UZAFMf_cbYPNQwBaOsVaAA#scrollTo=F7qSDdBGn8Vv
+
+# --- (1) ATOMS DEFINITIONS and ALIGNMENT ---
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_g_r_o_u_p.html
+#
+# Select subsets of atoms for use with COORDINATION: host / ligand / water.
+
+# HOST: GROUP ATOMS=16-199      #host atoms
+# LIGC: GROUP ATOMS=1-6         #carbon atoms in the ligand
+# l1: GROUP ATOMS=1             #ligand selected atoms
+# l2: GROUP ATOMS=3
+# l3: GROUP ATOMS=4
+# l4: GROUP ATOMS=6
+# WO: GROUP ATOMS=209-6508:3    #water oxygen atoms; ~ 2100
+
+HOST: GROUP ATOMS=1-714      #all dna atoms -- include Ks (715-717) or not?
+LIGC: GROUP ATOMS=719,721,725,728,732,733,735,737,742,744,748,750,754,757,761,763,765,769
+#ALL carbon atoms in the ligand (18)
+l1: GROUP ATOMS=725          #ligand selected atoms
+l2: GROUP ATOMS=735
+l3: GROUP ATOMS=742
+l4: GROUP ATOMS=754
+WO: GROUP ATOMS=773-98088:3
+# big performance hit between :3 and :30
+# water oxygen atoms, where X = first O, Y = last atom (any); ~ 3200
+# see: ./ckit1_tmx_em100.gro
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_c_e_n_t_e_r.html
+#
+# Calculate the center of the ligand carbons, and store as a virtual atom
+# (labeled "lig"), with charge and mass equal to the sum of the constituent
+# atoms. This is used for DISTANCE.
+
+lig: CENTER ATOMS=LIGC
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_w_h_o_l_e_m_o_l_e_c_u_l_e_s.html
+#
+# Reconstruct host at every step if it becomes split by PBC.
+
+WHOLEMOLECULES ENTITY0=HOST
+
+# pre-LDA bias, required for unbound
+K: GROUP ATOMS=715
+Au: GROUP ATOMS=741
+distK_Au: DISTANCE ATOMS=K,Au NOPBC
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_f_i_t__t_o__t_e_m_p_l_a_t_e.html
+#
+# The template is, for all intents and purposes, a "truncated" core .gro that
+# is converted to .pdb. It should only contain C and O. Atom numbers do not
+# have to be sequential, and should correspond exactly to the actual .gro. We
+# select all non-H atoms in the DNA (470 atoms).
+
+FIT_TO_TEMPLATE STRIDE=1 REFERENCE=ckit1_tmx_em100_template.pdb TYPE=OPTIMAL
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_f_i_x_e_d_a_t_o_m.html
+#
+# Select the spatial "centre" of the target, and create virtual atoms at
+# equally spaced points away from it. Coordinates must be given in nm (i.e.
+# same as .gro).
+#
+# We take K 715 to be the first virtual atom and use 0.2 nm intervals along the z-axis.
+# Note: previously, 0.02 nm intervals were erroneously used!
+
+# ckit1_tmx_npt_bound_dnaposre.gro: K 715 4.8820,4.9320,5.3260
+v1: FIXEDATOM AT=4.8820,4.9320,5.3260
+v2: FIXEDATOM AT=4.8820,4.9320,5.5260
+v3: FIXEDATOM AT=4.8820,4.9320,5.7260
+v4: FIXEDATOM AT=4.8820,4.9320,5.9260
+v5: FIXEDATOM AT=4.8820,4.9320,6.1260
+v6: FIXEDATOM AT=4.8820,4.9320,6.3260
+v7: FIXEDATOM AT=4.8820,4.9320,6.5260
+v8: FIXEDATOM AT=4.8820,4.9320,6.7260
+
+# # ckit1_tmx_npt_unbound_ligposre.gro: K 715 4.8980,5.0590,5.2690
+# v1: FIXEDATOM AT=4.8980,5.0590,5.2690
+# v2: FIXEDATOM AT=4.8980,5.0590,5.2890
+# v3: FIXEDATOM AT=4.8980,5.0590,5.3090
+# v4: FIXEDATOM AT=4.8980,5.0590,5.3290
+# v5: FIXEDATOM AT=4.8980,5.0590,5.3490
+# v6: FIXEDATOM AT=4.8980,5.0590,5.3690
+# v7: FIXEDATOM AT=4.8980,5.0590,5.3890
+# v8: FIXEDATOM AT=4.8980,5.0590,5.4090
+
+# The rest of these settings just use the variables defined above, and should
+# not need to be edited.
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_d_i_s_t_a_n_c_e.html
+
+# --- (2) DESCRIPTORS ---
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_c_o_o_r_d_i_n_a_t_i_o_n.html
+#
+# Calculate number of contacts between a ligand/virtual atom and water, then
+# normalise these numbers. These will be used in conjunction with a pytorch
+# model.
+#
+#     SWITCH: custom switching function (continuous)
+#     NLIST: neighbour list; only calculate a relevant subset of the pairwise distance at every step
+
+L1: COORDINATION GROUPA=l1 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=6 MM=10} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+L2: COORDINATION GROUPA=l2 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=6 MM=10} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+L3: COORDINATION GROUPA=l3 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=6 MM=10} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+L4: COORDINATION GROUPA=l4 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=6 MM=10} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V1: COORDINATION GROUPA=v1 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V2: COORDINATION GROUPA=v2 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V3: COORDINATION GROUPA=v3 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V4: COORDINATION GROUPA=v4 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V5: COORDINATION GROUPA=v5 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V6: COORDINATION GROUPA=v6 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V7: COORDINATION GROUPA=v7 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+V8: COORDINATION GROUPA=v8 GROUPB=WO SWITCH={RATIONAL D_0=0.0 R_0=0.25 NN=2 MM=6} NLIST NL_CUTOFF=1.0 NL_STRIDE=5
+
+d1: MATHEVAL ARG=L1 FUNC=(x/2.5)-1.0 PERIODIC=NO  #normalized descriptors
+d2: MATHEVAL ARG=L2 FUNC=(x/2.5)-1.0 PERIODIC=NO
+d3: MATHEVAL ARG=L3 FUNC=(x/2.5)-1.0 PERIODIC=NO
+d4: MATHEVAL ARG=L4 FUNC=(x/2.5)-1.0 PERIODIC=NO
+d5: MATHEVAL ARG=V1 FUNC=(x/2.8)-1.0 PERIODIC=NO
+d6: MATHEVAL ARG=V2 FUNC=(x/2.8)-1.0 PERIODIC=NO
+d7: MATHEVAL ARG=V3 FUNC=(x/2.8)-1.0 PERIODIC=NO
+d8: MATHEVAL ARG=V4 FUNC=(x/2.8)-1.0 PERIODIC=NO
+d9: MATHEVAL ARG=V5 FUNC=(x/2.8)-1.0 PERIODIC=NO
+d10: MATHEVAL ARG=V6 FUNC=(x/2.8)-1.0 PERIODIC=NO
+d11: MATHEVAL ARG=V7 FUNC=(x/2.8)-1.0 PERIODIC=NO
+d12: MATHEVAL ARG=V8 FUNC=(x/2.8)-1.0 PERIODIC=NO
+
+# d1: MATHEVAL ARG=L1 FUNC=(x/2.5) PERIODIC=NO
+# d2: MATHEVAL ARG=L2 FUNC=(x/2.5) PERIODIC=NO
+# d3: MATHEVAL ARG=L3 FUNC=(x/2.5) PERIODIC=NO
+# d4: MATHEVAL ARG=L4 FUNC=(x/2.5) PERIODIC=NO
+# d5: MATHEVAL ARG=V1 FUNC=(x/2.8) PERIODIC=NO
+# d6: MATHEVAL ARG=V2 FUNC=(x/2.8) PERIODIC=NO
+# d7: MATHEVAL ARG=V3 FUNC=(x/2.8) PERIODIC=NO
+# d8: MATHEVAL ARG=V4 FUNC=(x/2.8) PERIODIC=NO
+# d9: MATHEVAL ARG=V5 FUNC=(x/2.8) PERIODIC=NO
+# d10: MATHEVAL ARG=V6 FUNC=(x/2.8) PERIODIC=NO
+# d11: MATHEVAL ARG=V7 FUNC=(x/2.8) PERIODIC=NO
+# d12: MATHEVAL ARG=V8 FUNC=(x/2.8) PERIODIC=NO
+
+# https://www.plumed.org/doc-v2.7/user-doc/html/_a_n_g_l_e.html
+# Additional CVs to be collected
+
+# ang: ANGLE ATOMS=v3,v5,8,6   #angle of a ligand's axis with z
+# cosang: MATHEVAL ARG=ang FUNC=cos(x) PERIODIC=NO
+ene: ENERGY
+
+# Restrain host via DPOSRE, always
+# Restrain ligand via funnel, mainly for metaD
+# Along first virtual atom (K) and centre of ligand
+# This causes ligand to bounce "up and down" along the axis
+# Funnel can also be used in NPT, just doesn't have any real meaning?
+# Check if satisfactory NPT trajectory first
+
+# no include = no bias = bound
+INCLUDE FILE=
+
+PRINT ARG=d1,d2,d3,d4,d5,d6,d7,d8,d9,d10,d11,d12,distK_Au,ene STRIDE=250 FILE=COLVAR FMT=%8.4f
+
+ENDPLUMED

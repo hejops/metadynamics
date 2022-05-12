@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	Check status of gromacs jobs
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+cd /scratch/$(whoami)/ckit_testing
+
+logs=$(find . -name '*log')
+
+while read -r log; do
+
+	if grep -q 'Finished mdrun' <"$log"; then
+		:
+		continue
+	fi
+
+	mtime=$(stat -c %Y "$log")
+	now=$(date +%s)
+
+	echo -n "$log: "
+
+	if [[ $((now - mtime)) -gt 120 ]]; then
+		echo "Dead? $(stat -c %y "$base.log")"
+		continue
+	fi
+
+	if ! step=$(grep <"$log" -A1 'Step' | tail -n1 | xargs | cut -d' ' -f1); then
+		echo "Invalid file"
+		continue
+	fi
+
+	remain=$((50000000 - step))
+	timeleft=$(echo "$remain * 0.0062" | bc)
+	eta=$(date -d "+$timeleft seconds")
+	echo "ETA $eta ($remain steps remaining, $timeleft s)"
+	# avg speed = 0.0062 s / step (8 cores)
+	# (range: 0.00567 - 0.00675)
+	# this gives a reasonable estimate, within 1 hour
+done <<<"$logs" | sort -k9 -V

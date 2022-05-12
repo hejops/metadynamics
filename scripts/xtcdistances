@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+# GROUPS is some env variable
+# https://manual.gromacs.org/documentation/5.1/onlinehelp/selections.html
+DIST_GROUPS=(
+
+	"atomnr 715"
+	"com of resnr 1"
+	"com of resnr 11"
+	"com of resnr 5"
+	"com of resnr 9"
+)
+
+for XTC in ./*.xtc; do
+
+	if [[ $(du -h "$XTC") != 344M* ]]; then
+		echo "Simulation not yet finished: $XTC"
+		continue
+	fi
+
+	# XTC=$1
+	TPR=${XTC/.xtc/.tpr}
+
+	for GROUP in "${DIST_GROUPS[@]}"; do
+		{
+			SECONDS=0
+			OUT=${XTC/.xtc/_$GROUP}
+			OUT="${OUT// /_}"
+			if [[ -f "$OUT.xvg" ]]; then
+				echo "Already generated: $OUT.xvg"
+				return
+			fi
+			echo "$XTC"
+			echo "$GROUP"
+			ds=$(gmx_mpi distance \
+				-f "$XTC" \
+				-s "$TPR" \
+				-select "com of group 13 plus $GROUP" \
+				-oall "$OUT" 2>&1)
+
+			sed -i -r 's|^@|#|' "$OUT.xvg"
+
+			grep <<<"$ds" "nm$" | sed -r 's|^|#|' | tee -a "$OUT.xvg"
+
+			# if grep -q nm <<<"$ds"; then
+			# 	grep <<<"$ds" "nm$" | sed -r 's|^|#|' | tee -a "$OUT.xvg"
+			# else
+			# 	echo "No stats provided?"
+			# fi
+
+			echo "Took $SECONDS s"
+		} &
+
+	done
+done

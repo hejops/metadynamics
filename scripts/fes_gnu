@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail +o history
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") FES [config]
+	Generate 3D FES (2 CV). For 2D FES (1 CV),
+	use one of either
+	fes_1cv.py, fes_group_indiv.py, or fes_group_lincom.py.
+
+	There is probably a pyplot equivalent for this,
+	but I don't have to time to work on it right now
+EOF
+	exit
+}
+
+[[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 		<++>) <++> ;;
+# 		<++>) <++> ;;
+# 		<++>) <++> ;;
+# 		\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND -1))
+
+fes=$1
+
+# if [[ $# -eq 2 ]]; then
+# 	conf=$2
+# else
+# 	# this will obviously be slow when there are many large files in the dir
+# 	# conf=$(grep -l ^splot ./* | head -1)
+# 	conf=$HOME/gromacs/scripts/gnuplot_2cv
+# 	echo "No config provided; defaulting to $conf"
+# fi
+
+# conf=$HOME/gromacs/scripts/gnuplot_2cv
+
+# conf=$(cat "$conf")
+
+conf=$(
+	cat <<EOF
+
+# set style fill empty border
+set output '${fes}_gnu.png'
+set style rectangle fillstyle noborder
+set terminal png size 1920,1080
+set terminal png transparent
+
+# set border 0
+# set border 127+256+512
+# set border 31 lt -1 lw 1.000
+# set border back
+# set cbrange [-50:0]
+# set hidden3d offset 1 trianglepattern 3 undefined 1 altdiagonal bentover
+# set isosamples 30, 30
+# set pm3d at b
+# set pm3d at s
+# set samples 30, 30
+# set style data line
+# set style textbox opaque margins  0.5,  0.5 noborder
+# set terminal png transparent nocrop enhanced font arial 8 size 420,320
+# set title "set hidden3d" 0.000000,0.000000  font ""
+# set view 50, 220, 1, 1
+# set xlabel "x" 0.000000,0.000000  font ""
+# set xrange [ 0 : 2 ] noreverse nowriteback
+# set ylabel "y" 0.000000,0.000000  font ""
+# set yrange [ -4 : 4  ] noreverse nowriteback
+# set zrange [ -20 : 0 ] noreverse nowriteback
+set bar 1.000000 front
+set cntrlabel  format '%8.3g' font ',7' start 0 interval 5
+set cntrparam levels auto 17
+set colorbox vertical origin screen 0.9, 0.2, 0 size screen 0.05, 0.6, 0 front  noinvert bdefault
+set contour both
+set isosamples 21, 21
+set key at screen 1, 0.9, 0 right top vertical Right noreverse enhanced autotitle nobox
+set key left bottom Left title '' box 3
+set key noautotitle
+set object 1 rectangle from screen 0,0 to screen 1,1 fillcolor rgb'white' behind
+set palette rgbformulae 33,13,10
+set samples 20, 20
+set style circle radius graph 0.02, first 0.00000, 0.00000
+set style data line
+set style ellipse size graph 0.05, 0.03, first 0.00000 angle 0 units xy
+set tics font "Times New Roman,20"
+set view 75, 30, 1, 1.1
+set xrange[-4:0]
+set yrange[0:2.5]
+unset logscale
+
+set xlabel "s" font "Times New Roman,20"
+set ylabel "d" font "Times New Roman,20"
+set zlabel "ΔG" font "Times New Roman,20"
+
+set tics offset 0,-2
+set xlabel offset 0,-2
+set ylabel offset 0,-2
+set zlabel offset -4
+
+# splot = 3d
+splot "$1"
+EOF
+)
+
+# fes header
+#! FIELDS dist1 dist2 file.free der_dist1 der_dist2	-- columns: distance ... derivative of distance
+# file.free = free energy?
+#! SET min_dist1 14.447		-- xrange; every block starts and end with these values
+#! SET max_dist1 15.8056
+#! SET nbins_dist1  40		-- number of lines in each block
+#! SET periodic_dist1 false
+#! SET min_dist2 13.1796	-- yrange; first and last block have these values
+#! SET max_dist2 14.349			this is why the contour gets "sliced"
+#! SET nbins_dist2  35		-- number of blocks
+#! SET periodic_dist2 false
+# removing blank lines, retains shape, but destroys contour
+
+get_ranges() {
+	# give 1 unit of spacing around the plot
+	header=$(grep <"$fes" ^#)
+	xmin=$(sed -rn '/min_dist1/ s|.+ ([0-9]+).+|\1|p' <<<"$header")
+	xmax=$(sed -rn '/max_dist1/ s|.+ ([0-9]+).+|\1|p' <<<"$header")
+	xrange="$((xmin - 1)):$((xmax + 1))"
+
+	ymin=$(sed -rn '/min_dist2/ s|.+ ([0-9]+).+|\1|p' <<<"$header")
+	ymax=$(sed -rn '/max_dist2/ s|.+ ([0-9]+).+|\1|p' <<<"$header")
+	yrange="$((ymin - 1)):$((ymax + 1))"
+
+	conf=$(sed -r "/xrange/ s|[:0-9]+|$xrange|g" <<<"$conf")
+	conf=$(sed -r "/yrange/ s|[:0-9]+|$yrange|g" <<<"$conf")
+}
+
+# TODO: allow multiple splots -- need to label properly
+
+# conf=$(sed -r "
+# /^set title/ s|'.+'|'${fes//_/-}'|g
+# /^splot/ s|'.+'|'$fes'|g
+# /^set output/ s|'.+'|'${fes/.dat/.png}'|g
+# " <<<"$conf")
+# # get_ranges
+
+# echo "$conf"
+
+pgrep gnuplot_qt && pkill gnuplot_qt
+
+gnuplot -p -c <(echo "$conf") & # print contents, pass as file

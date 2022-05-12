@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail +o history
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") PT
+	Convert NPT plumed file to metaD plumed file
+EOF
+	exit
+}
+
+[[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 		<++>) <++> ;;
+# 		<++>) <++> ;;
+# 		<++>) <++> ;;
+# 		\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND -1))
+
+mkplumed() {
+	# note: .pt files must be CPU
+	pt=$1
+	case ${pt::1} in
+
+	S) plumed=plumed_ckit_stack22.dat ;;
+	a) plumed=plumed_ckit_all.dat ;;
+	c) plumed=plumed_ckit_coord.dat ;;
+	d) plumed=plumed_ckit_dist.dat ;;
+	h) plumed=plumed_ckit_dihedral.dat ;;
+	s) plumed=plumed_ckit_stack.dat ;;
+
+	esac
+
+	run=${pt/.pt/}
+	plumed_metad=${plumed/.dat/_metad.dat}
+	plumed_metad=${plumed_metad/.dat/_$run.dat}
+
+	if [[ -f "$plumed_metad" ]]; then
+		echo "Already exists: $plumed_metad"
+		# exit
+	fi
+
+	# PLUMED refuses to work if torch was used with CUDA:
+	# +++ PLUMED error
+	# +++ at Action.cpp:243, function void PLMD::Action::error(const string&) const
+	# +++ message follows +++
+	# ERROR in input to action PYTORCH_MODEL with label s : Cannot find Pytorch
+	# model.
+
+	# get comma-separated list of CVs
+	# do not include energy, since it was never used with deeplda
+
+	PLUMED_DIR=$HOME/gromacs/ckit
+	CVs=$(grep <"$PLUMED_DIR/$plumed" -P '^[^#:]+:' |
+		grep -v 'GROUP ' |
+		grep -v CENTER |
+		grep -v FIXEDATOM |
+		grep -v ENERGY |
+		cut -d: -f1 |
+		tr '\n' ,)
+
+	CVs=${CVs::-1}
+
+	{
+		# comment out existing PRINT/ENDPLUMED statements
+		sed <"$PLUMED_DIR/$plumed" -r '
+		s|^(PRINT)|# \1|
+		s|^(ENDPLUMED)|# \1|
+		'
+
+		# append metad section
+		# GRID_MAX/MIN should sometimes be (-)400
+		cat <<EOF
+s: PYTORCH_MODEL MODEL=$pt ARG=$CVs
+sw: MATHEVAL ARG=s.node-0 FUNC=x+x^3 PERIODIC=NO
+
+METAD ...
+# WALKERS_MPI
+ARG=sw
+BIASFACTOR=12
+FILE=${pt/.pt/.HILLS}
+GRID_MAX=400
+GRID_MIN=-400
+GRID_SPACING=0.1
+HEIGHT=0.1
+LABEL=metad
+PACE=500
+RESTART=NO
+SIGMA=0.1 #,0.1
+TEMP=300
+... METAD
+
+PRINT ARG=* STRIDE=250 FILE=${pt/.pt/.COLVAR} FMT=%8.4f
+ENDPLUMED
+EOF
+	} >$plumed_metad
+
+	echo "Generated $plumed_metad"
+}
+
+startrun() {
+
+	base=${1/.pt/}
+	if ! PLUMED=$(find . -name "*plumed*$base*"); then
+		echo "No plumed file found for $base"
+		echo "Rerun?"
+		exit 1
+	fi
+
+	TPR=$base.tpr
+	if [[ -f $TPR ]]; then
+		echo "Already grompp'd: $base"
+	else
+		gmx_mpi grompp -maxwarn 999 -f metad.mdp -c ckit1_tmx_npt.gro -p ckit1_tmx.top -r ckit1_tmx_npt.gro -o "$TPR"
+	fi
+
+	# always use 8 threads; 3 jobs on each GPU
+	# only 1 GPU now
+	GPU=0
+
+	CPUS_USED=$(ps -C "gmx_mpi" -o pcpu= | awk '{s+=$1}END{print s}')
+
+	# use at most 3x12 cores, else 8
+	if [[ $CPUS_USED -gt 3600 ]]; then
+		CPUS=8
+	else
+		CPUS=12
+	fi
+
+	if [[ -f "$base.cpt" ]]; then
+		set -x
+		gmx_mpi mdrun -v -plumed "$PLUMED" -deffnm "$base" -ntomp $CPUS -pin auto -cpi "$base.cpt" # -gpu_id $GPU
+	else
+		gmx_mpi mdrun -v -plumed "$PLUMED" -deffnm "$base" -gpu_id $GPU -ntomp $CPUS -pin auto
+	fi
+}
+
+pt=$1
+[[ $pt != *.pt ]] && pt=$pt.pt
+mkplumed "$pt"
+startrun "$pt"

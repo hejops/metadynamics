@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+# HILLS300 -> fes300.dat
+HILLS="$(find . -name '*HILLS*')"
+if [[ -z "$HILLS" ]]; then
+	echo "No HILLS files found"
+	exit
+fi
+
+while read -r f; do
+
+	# # complete HILLS files have 100,003 lines
+	# # file cannot be relied on since number of columns may differ
+	# [[ $(wc <"$f" -l) -lt 100000 ]] && {
+	# 	echo "Not yet finished: $f"
+	# 	continue
+	# }
+
+	if [[ $f == HILLS* ]]; then
+		out=$(sed <<<"$f" -r 's|HILLS(.*)|fes\1.dat|')
+	else
+		out=${f/HILLS/FES}
+	fi
+
+	# fsz=$(du "$f" | cut -f1)
+	# outsz=$(du "$out" | cut -f1)
+	# fes is always larger than HILLS (at least 100x)
+	if [[ -f "$out" ]]; then
+		echo "Already exists: $out"
+		continue
+	fi
+
+	echo "Generating: $out"
+	plumed sum_hills --hills "$f" --outfile "$out"
+	notify-send "Generated: $out"
+
+done <<<"$HILLS"
+
+notify-send "All FES generated"

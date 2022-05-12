@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail +o history
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") FES
+	Find FES frame with lowest energy
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# TODO: allow pdb $1
+
+get_energy() {
+
+	fes=$1
+	min="${fes/.dat/.min}"
+	hill="$(<<< "$fes" sed -r 's|fes([^.]+)\.dat|HILLS\1|')"
+	conf="$(<<< "$fes" sed -r 's|fes([^.]+)\.dat|md\1.conf|')"
+	# exit
+	echo "File: $fes"
+
+	if [[ -f $min ]]; then
+		echo "Reading energy from $min"
+		cat "$min"
+		energy_line=$(cat "$min")
+	else
+		# minimum energy is unambiguous
+		echo "Searching for minimum energy; this might take a while..."
+
+		if < $fes head -n1 | grep -q dist2; then
+			energy_line=$(< "$fes" tr -s ' ' | awk '$3 ~ /^-[^0]/ {print $0}' | sort -k3 -V | tail -n1)
+			e=$(<<< $energy_line cut -d' ' -f4 | grep -Po '\d+\.\d{2}')
+		else
+			# only 1 distance (much faster to sort)
+			energy_line=$(< "$fes" tr -s ' ' | sort -k2 -V | tail -n1)
+			e=$(<<< $energy_line cut -d' ' -f3 | grep -Po '\d+\.\d{2}')
+		fi
+
+		echo "Energy minimum found: $e"
+		echo "$energy_line" > "$min"
+	fi
+}
+
+get_frame() {
+	d1=$(<<< $energy_line cut -d' ' -f2) 
+	d2=$(<<< $energy_line cut -d' ' -f3) 
+	dt1=$(<<< $d1 grep -Po '\d+\.\d{1}')
+	dt2=$(<<< $d2 grep -Po '\d+\.\d{1}')
+	echo "Searching for frame with approximate distances: $dt1, $dt2"
+
+	if < $fes head -n1 | grep -q dist2; then
+
+		# number of dps may vary...
+		# in rare cases, 1 dp won't match
+		frames=$(< $hill grep -P -m10 -C50 " ${dt1/./\\.}.+ ${dt2/./\\.}" | gawk -v d1="$d1" -v d2="$d2" '{print ($2-d1)^2+($3-d2)^2 $0}' | sort -g)
+
+	else
+
+		frames=$(< $hill gawk -v d1="$d1" '{print ($2-d1)^2 $0}' | sort -g)
+
+	fi
+
+	head <<< "$frames" | tac
+	frame=$(<<< "$frames" head -n1)
+	echo "$frame"
+	echo "$energy_line"
+	f=$(<<< $frame awk '{print $2}' | cut -d. -f1)
+	echo "Found frame: $f"
+	echo "animate goto ${f%?}" > "$conf"
+
+}
+
+if [[ $# -eq 0 ]]; then
+	fes=$(find . -name 'fes*dat')
+elif [[ -f $1 ]] && [[ $1 = fes*.dat ]]; then
+	fes=$1
+else
+	usage
+fi
+
+while read -r x; do
+	get_energy "$x"
+	get_frame
+done <<< "$fes"
+
+# echo "Check in vmd"
+
+# vmd always crashes out
+# vmd -e <(echo "animate goto ${f%?}") "${conf/.conf/.pdb}" &
+# vmd -e $conf "${conf/.conf/.pdb}" &

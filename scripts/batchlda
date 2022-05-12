@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail +o history
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	Run DeepLDA on all COLVAR files in current dir
+	Generally, this should be done on oceanids
+EOF
+	exit
+}
+
+if [[ $(hostname) != oceanids ]]; then
+	echo "Will only run on oceanids!"
+	exit
+fi
+
+# [[ $# -eq 0 ]] && usage
+[[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 		<++>) <++> ;;
+# 		<++>) <++> ;;
+# 		<++>) <++> ;;
+# 		\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND -1))
+
+# TODO: use combinations, rather than nested loops
+for CV in {c,d,h,s}; do
+	for i in {1..5}; do
+		SECONDS=0
+		fileA="${CV}b${i}"
+		fileB="${CV}u${i}"
+
+		[[ -f $fileA ]] || continue
+		[[ -f $fileB ]] || continue
+
+		out=${fileA}_${fileB}
+		if [[ -f $out.pt ]]; then
+			echo "Already processed: $out"
+			continue
+		fi
+
+		if grep <$fileA -Fq nan || grep <$fileB -Fq nan; then
+			echo "Skipping file(s) with nan column: ${CV}[bu]${i}"
+			continue
+		fi
+
+		# if you set 0,1, but CUDA 0 is in use, it won't bother trying the next one
+		CUDA=()
+		nvidia=$(nvidia-smi)
+		for x in {0,1}; do
+			grep <<<$nvidia -Pq " $x .+ C " || CUDA+=("$x")
+		done
+		printf -v CUDA '%s,' "${CUDA[@]}"
+
+		if [[ -z $CUDA ]]; then
+			echo "No CUDA available!"
+			echo "Started $fileA $fileB"
+		else
+			# trailing comma (0,1,) is fine
+			echo "Started $fileA $fileB on GPU $CUDA"
+		fi
+
+		# CUDA probably not used
+		# CUDA_VISIBLE_DEVICES=$CUDA deeplda.py "$fileA" "$fileB"
+
+		deeplda.py "$fileA" "$fileB"
+
+		echo "$fileA, $fileB: $SECONDS s" | tee -a lda.log
+	done
+done
+
+rsync -vv -auPr --stats ./*{1..5}.{pt,png,csv} $(whoami)@$SSH_IP:/scratch/$(whoami)/metad_torch 

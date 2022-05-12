@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") GRO
+	
+	Convert trr trajectories to multi-frame pdbs
+
+	In case of gromacs version mismatch, files will temporarily be copied
+	to oceanids and converted there
+
+	https://manual.gromacs.org/documentation/2018/onlinehelp/gmx-trjconv.html
+
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+while getopts "w" opt; do
+	case ${opt} in
+	w) WATER=1 ;;
+	# <++>) <++> ;;
+	# <++>) <++> ;;
+	\?) usage ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+WATER=
+pw=
+
+if [[ $# -eq 0 ]]; then
+	gros=$(find * -name '*gro' -print) || return
+else
+	gros=$1.gro
+fi
+
+while read -r g; do
+
+	pdb=${g/.gro/.pdb}
+	tpr=${g/.gro/.tpr}
+	trr=${g/.gro/.trr}
+	xtc=${g/.gro/.xtc}
+
+	[[ -f $pdb ]] && continue
+
+	if [[ -f $trr ]]; then
+		case $(du --block-size=1M "$trr" | cut -f1) in
+		# 11225 MB = 50 M nsteps
+		# 8983 = 40 M
+		# 5616 = 25 M
+		1122? | 8983 | 5616) : ;;
+		*) continue ;;
+		esac
+
+	elif [[ -f $xtc ]]; then
+		# fallback to xtc (NPT)
+		trr=$xtc
+		echo "Using $trr"
+	else
+		continue
+	fi
+
+	# centre around system (this removes all water)
+	# always use -pbc mol -center
+
+	if gmx_mpi dump -s "$tpr" >/dev/null 2>/dev/null; then
+
+		# each molecule will remain intact, but clipping can still occur!
+		echo non-Water non-Water | gmx_mpi trjconv -f "$trr" -s "$tpr" -pbc mol -center -o "$pdb"
+
+		# if water is to be retained
+		[[ -n "$WATER" ]] && echo DNA System | gmx_mpi trjconv -f "$trr" -s "$tpr" -pbc mol -center -o "${pdb/.pdb/_water.pdb}"
+
+	else
+
+		echo "Wrong version; running on oceanids"
+
+		[[ -z $pw ]] && read -r -s -p "Password: " pw </dev/tty
+
+		sshpass -p $pw rsync -vvauPr --stats $tpr $trr $(whoami)@$SSH_IP:/tmp/trjconv
+
+		# transfer takes like 18 mins smh
+
+		sshpass -p $pw ssh $(whoami)@$SSH_IP -t "
+		cd /tmp/trjconv 
+		bash -l 
+		# TODO: fix these in bashrc
+		. /usr/local/gromacs/bin/GMXRC.bash 
+		. /opt/intel/bin/ifortvars.sh -arch intel64 -platform linux
+		echo non-Water non-Water | gmx_mpi trjconv -f $trr -s $tpr -pbc mol -center -o $pdb
+		" </dev/null
+
+		sshpass -p $pw rsync -vvauPr --stats --remove-source-files $(whoami)@$SSH_IP:/tmp/trjconv/* .
+
+		continue
+	fi
+
+done <<<"$gros"
+
+notify-send "All PDBs generated"
+
+if [[ $(pwd) == /scratch/$(whoami)/metad_torch ]]; then
+	for f in *pdb; do
+		# pdbs are 325 MB
+		[[ $(du --block-size=1M "$f" | cut -f1) -lt 320 ]] && continue
+		ln -sf "$(realpath "$f")" "/scratch/$(whoami)/metad_torch_trajectories/${f}"
+	done
+fi

@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+set -euo pipefail +o history
+
+HOST=$(hostname)
+pwd=$(pwd)
+
+if [[ $HOST = oceanids ]] && [[ $pwd != /scratch* ]]; then
+	echo "Will not run from $pwd; run from /scratch instead"
+	# TODO cd there
+	exit 1
+fi
+
+# if [[ $HOST = oceanids ]]; then
+# 	# local
+# 	# GMX=gmx_mpi
+# 	COMMAND() { gmx_mpi "$*"; }
+# else
+# 	# lrz, cm2login2
+# 	# GMX=gmx
+# 	COMMAND() { APPEND "$*"; }
+# 	# module load slurm_setup
+# 	# module load gromacs/2019-plumed
+# 	# module list
+# fi
+
+check_valid_temps() {
+	if [[ $# -eq 0 ]]; then
+		TEMPS=(300 350 400 450)
+	else
+		TEMPS=("$@")
+	fi
+
+	for temp in "${TEMPS[@]}"; do
+		if [[ ! $temp =~ [0-9]+ ]]; then
+			echo "Invalid temperature specified: $temp"
+			echo "Temperatures must be integers"
+			exit 1
+		elif [[ $temp -lt 300 ]]; then
+			echo "Temperature must be higher than 300: $temp"
+			exit 1
+		# TODO: ask if want to recalc
+		# elif [[ -d $temp ]]; then
+		fi
+	done
+
+	echo "The following temperatures will be used:"
+	echo "${TEMPS[*]}"
+	# exit
+}
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") MODE TEMPS
+	Set up a folder for NPT (em100.gro) or MD (nptXXX.gro) at a range of
+	temperatures
+	If no argument is provided, the following range is used:
+		${TEMPS[*]}
+EOF
+	exit
+}
+
+if [[ ${1:-} = --npt ]]; then
+	MODE=NPT
+elif [[ ${1:-} = --md ]]; then
+	MODE=MD
+else
+	usage
+fi
+shift
+
+check_valid_temps "$@"
+
+MKPLUMED() {
+	# edit the relevant headers before doing anything else
+	# TODO: do this with submit instead; detect pwd while in lrz
+	sed -i -r "s|CALCNAME|$dir|; s|DIRECTORY|$dir|" "$dir/$tiny"
+	sed -i -r "s|CALCNAME|$dir|; s|DIRECTORY|$dir|" "$dir/$std"
+
+	if [[ $MODE = MD ]]; then
+		# make 6 plumed files, with each one specifying a different HILLS filename
+		# plumed_WORKING400.dat	-> plumed_WORKING400_std_1.dat
+		# FILE=HILLS400		-> FILE=HILLS400_std_1
+		sed <"$dir/$PLUTEMP" -r "/FILE=/ s|$temp$|${temp}_std_1|" >"$dir/${PLUTEMP/$temp/${temp}_std_1}"
+		sed <"$dir/$PLUTEMP" -r "/FILE=/ s|$temp$|${temp}_std_2|" >"$dir/${PLUTEMP/$temp/${temp}_std_2}"
+		sed <"$dir/$PLUTEMP" -r "/FILE=/ s|$temp$|${temp}_std_3|" >"$dir/${PLUTEMP/$temp/${temp}_std_3}"
+		sed <"$dir/$PLUTEMP" -r "/FILE=/ s|$temp$|${temp}_tiny_1|" >"$dir/${PLUTEMP/$temp/${temp}_tiny_1}"
+		sed <"$dir/$PLUTEMP" -r "/FILE=/ s|$temp$|${temp}_tiny_2|" >"$dir/${PLUTEMP/$temp/${temp}_tiny_2}"
+		sed <"$dir/$PLUTEMP" -r "/FILE=/ s|$temp$|${temp}_tiny_3|" >"$dir/${PLUTEMP/$temp/${temp}_tiny_3}"
+	fi
+}
+
+MKSUBMIT() {
+	if [[ $MODE = NPT ]]; then
+		echo "gmx_mpi grompp -maxwarn 999 -f $NPTTEMP.mdp -c $f -p topol.top -r $f -o $NPTTEMP.tpr" | tee -a "$dir/submit"
+	else
+		# make a single submission file with all 6 grompps + 2 sbatchs
+		echo "gmx grompp -maxwarn 999 -f $MDTEMP.mdp -c $NPTTEMP.gro -p topol.top -r $NPTTEMP.gro -o ${MDTEMP}_std_1.tpr" | tee -a "$dir/submit"
+		echo "gmx grompp -maxwarn 999 -f $MDTEMP.mdp -c $NPTTEMP.gro -p topol.top -r $NPTTEMP.gro -o ${MDTEMP}_std_2.tpr" | tee -a "$dir/submit"
+		echo "gmx grompp -maxwarn 999 -f $MDTEMP.mdp -c $NPTTEMP.gro -p topol.top -r $NPTTEMP.gro -o ${MDTEMP}_std_3.tpr" | tee -a "$dir/submit"
+		echo "gmx grompp -maxwarn 999 -f $MDTEMP.mdp -c $NPTTEMP.gro -p topol.top -r $NPTTEMP.gro -o ${MDTEMP}_tiny_1.tpr" | tee -a "$dir/submit"
+		echo "gmx grompp -maxwarn 999 -f $MDTEMP.mdp -c $NPTTEMP.gro -p topol.top -r $NPTTEMP.gro -o ${MDTEMP}_tiny_2.tpr" | tee -a "$dir/submit"
+		echo "gmx grompp -maxwarn 999 -f $MDTEMP.mdp -c $NPTTEMP.gro -p topol.top -r $NPTTEMP.gro -o ${MDTEMP}_tiny_3.tpr" | tee -a "$dir/submit"
+		echo "sbatch $std" | tee -a "$dir/submit"
+		echo "sbatch $tiny" | tee -a "$dir/submit"
+	fi
+	# ( cd $dir && pwd && bash submit )
+}
+
+APPEND() {
+	if [[ $MODE = NPT ]]; then
+		# only 1 mdrun needed
+
+		echo "gmx_mpi $*" | tee -a "$dir/$std"
+		# echo "gmx_mpi ${*//${temp}/${temp}_tiny}" | tee -a "$tiny"
+	else
+		# make 2 sbatch files with 3 runs each
+		echo "mpiexec gmx ${*//${temp}/${temp}_std_1}" | tee -a "$dir/$std"
+		echo "mpiexec gmx ${*//${temp}/${temp}_std_2}" | tee -a "$dir/$std"
+		echo "mpiexec gmx ${*//${temp}/${temp}_std_3}" | tee -a "$dir/$std"
+		echo "mpiexec gmx ${*//${temp}/${temp}_tiny_1}" | tee -a "$dir/$tiny"
+		echo "mpiexec gmx ${*//${temp}/${temp}_tiny_2}" | tee -a "$dir/$tiny"
+		echo "mpiexec gmx ${*//${temp}/${temp}_tiny_3}" | tee -a "$dir/$tiny"
+		echo "Generated $tiny, $std"
+	fi
+}
+
+read -r -p "Add suffix?: " suffix </dev/tty
+
+PLU=plumed_WORKING.dat
+slurm=slurm.sh         # template for tiny
+slurm_std=slurm_std.sh # template for std
+
+for temp in "${TEMPS[@]}"; do
+
+	dir="$(date -I)_${MODE}"
+
+	if [[ $MODE = MD ]]; then #&& [[ ! -f "$NPTTEMP.gro" ]]; then
+		f=$(find /scratch/$(whoami)/finished_runs -name "npt$temp*.gro" | fzf --prompt="Select npt$temp.gro file: ")
+		hash=$(md5sum "$f" | cut -c-7)
+		dir="${dir}_${temp}_$hash"
+	else
+		[[ -z ${f:-} ]] && f=$(find * -name "*em100.gro" -print | fzf --prompt="Select em.gro file: ")
+		hash=$(md5sum "$f" | cut -c-7)
+		# https://stackoverflow.com/a/53839433
+		temps="${TEMPS[*]}"
+		temps="${temps//${IFS:0:1}/_}"
+		dir="${dir}_$temps"
+		echo "$dir"
+		# exit
+	fi
+
+	[[ -n ${suffix:-} ]] && dir="${dir}_$suffix"
+
+	[[ -d $dir ]] && { echo "Already exists: $dir"; }
+	mkdir -p "$dir"
+	dirs+=("$dir")
+
+	cp -r amber99* "$dir"
+	cp posre* "$dir"
+	cp residuetypes.dat "$dir"
+	cp topol* "$dir"
+
+	log="$dir/log"
+	# TODO: output hashes to this file
+	# rm -f "$log"
+
+	# create config files with modified temps
+	# HILLSTEMP="HILLS$temp"
+	# COLVARTEMP="COLVAR$temp"
+	# FESTEMP="$dir/fes$temp.dat"
+	# npt    ref_t, gen_temp
+	# md     ref_t
+	# plumed TEMP
+
+	# create config files with modified temps
+	for file in npt.mdp md.mdp $PLU; do
+		tmpfile=${file/./$temp.}
+		# e.g. npt.mdp -> 350/npt350.mdp
+		# FILE=HILLS -> FILE=300/HILLS300
+		sed <"$file" -r "/(ref_t|gen_temp|TEMP)/ s|300|$temp|1; /FILE=HILLS/ s|HILLS|HILLS$temp|; /FILE=COLVAR/ s|COLVAR|COLVAR$temp|" >"$dir/$tmpfile"
+	done
+
+	# for local tests only
+	# if [[ $HOST = oceanids ]]; then
+	# 	sed -i -r '/nsteps/ s|[0-9]+|10000|1' "$dir/"*
+	# fi
+
+	# create submission scripts and the "meta" submission script
+	tiny="tiny_${temps:-$temp}_$hash.sh"
+	std="std_${temps:-$temp}_$hash.sh"
+	cp -n "$slurm" "$dir/$tiny"
+	cp -n "$slurm_std" "$dir/$std"
+
+	cp -n "$slurm" "$dir/submit"
+
+	NPTTEMP="npt$temp"
+	MDTEMP="md$temp"
+	PLUTEMP="${PLU/./$temp.}" # plumed_WORKING.dat -> plumed_WORKING400.dat
+
+	# generate binary tpr files (random seed) with grompp
+	# IMPORTANT: tprs generated by local gmx are incompatible with lrz gmx!
+	if [[ $MODE = NPT ]]; then
+		cp "$f" "$dir/$f"
+		# use GPU locally
+		APPEND mdrun -v -deffnm "$NPTTEMP" -pin on -pinoffset 32 -gpu_id 1
+
+	else
+		cp "$f" "$dir/$NPTTEMP.gro"
+		# up to 17 hours per mdrun
+		APPEND mdrun -v -plumed "$PLUTEMP" -deffnm "$MDTEMP"
+
+	fi
+
+	MKPLUMED
+	MKSUBMIT
+
+	# if [[ $HOST = oceanids ]]; then
+	# 	sed -i -r 's|^mpiexec gmx|gmx_mpi|' "$tiny"
+	# fi
+
+done
+
+lrzscr="$LRZ_SCRATCH_PATH/"
+lrzid="$LRZ_LOGIN"
+rsync -vLau "${dirs[@]}" "$lrzid:$lrzscr" && notify-send "Copy done"
+
+cat <<EOF
+Setup and rsync complete: $MODE, ${TEMPS[@]}
+In LRZ, run:
+	bash submit
+EOF
+# sbatch std/tiny_XXX.sh
+# TODO: find all submit, if not found in sview, run it

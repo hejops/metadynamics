@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+[[ $# -eq 2 ]] && cd "$2"
+# cd /scratch/$(whoami)/local_tests
+
+tmux new-session -d
+
+n=$1
+
+# for i in {0..4}; do
+for i in $(seq 2 $n); do
+	tmux split-window #"ls"
+	tmux select-layout tiled
+done
+
+tmux select-layout tiled
+
+tmux attach

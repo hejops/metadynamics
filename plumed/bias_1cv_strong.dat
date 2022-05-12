@@ -1,0 +1,26 @@
+# vim:ft=plumed
+
+# expect unbound state
+
+FIT_TO_TEMPLATE STRIDE=1 REFERENCE=./ckit1_tmx_npt_unbound_ligposre_template.pdb TYPE=OPTIMAL
+
+# strong bias prevents ligand from binding to DNA
+
+METAD ...
+# WALKERS_MPI
+# ARG=cyl.z
+# ARG=cyl.z,sw		# once sw is re-implemented
+ARG=distK_Au		# this should always be defined in the base file
+# BIASFACTOR=12		# only required for well-tempered metaD
+FILE=HILLS
+GRID_MAX=200
+GRID_MIN=-200
+GRID_SPACING=0.1
+# HEIGHT=0.1		# there is no default value, but we generally use 0.1
+HEIGHT=0.3
+LABEL=metad
+PACE=500
+RESTART=NO
+SIGMA=0.1 #,0.1
+TEMP=300
+... METAD

@@ -1,0 +1,41 @@
+# vim:ft=plumed
+
+# expect bound state
+
+FIT_TO_TEMPLATE STRIDE=1 REFERENCE=./ckit1_tmx_npt_bound_dnaposre_template.pdb TYPE=OPTIMAL
+
+# pytorch bias
+
+s: PYTORCH_MODEL MODEL=MODEL ARG=CVs
+sw: MATHEVAL ARG=s.node-0 FUNC=x+x^3 PERIODIC=NO
+
+# funnel bias
+
+cyl: DISTANCE ATOMS=v1,lig COMPONENTS
+
+# radius: MATHEVAL ARG=cyl.x,cyl.y FUNC=sqrt(x*x+y*y) PERIODIC=NO
+# funnel: MATHEVAL ARG=radius,cyl.z VAR=r,z FUNC=(r+0.1*(-1.2+z))*step(-z+1.)+(r+0.2)*step(z-1.) PERIODIC=NO
+# # https://www.plumed.org/doc-v2.6/user-doc/html/_u_p_p_e_r__w_a_l_l_s.html
+# UPPER_WALLS AT=0   ARG=funnel KAPPA=2000.0       LABEL=funnelwall  #funnel restraint
+# UPPER_WALLS AT=1.8 ARG=cyl.z  KAPPA=4000.0 EXP=2 LABEL=upper_wall  #upper limit of cyl.z -- reduce this for more boundness?
+
+# this does not add an extra column to existing COLVAR, so different filename must be specified
+PRINT ARG=sw,cyl.z STRIDE=250 FILE=COLVAR_sw FMT=%8.4f
+
+METAD ...
+# WALKERS_MPI
+ARG=sw,cyl.z
+BIASFACTOR=12
+FILE=HILLS
+GRID_MAX=400,400
+GRID_MIN=-400,-400
+GRID_SPACING=0.1,0.1
+HEIGHT=0.1
+LABEL=metad
+PACE=500
+RESTART=NO
+SIGMA=0.1,0.1
+TEMP=300
+... METAD
+
+ENDPLUMED

@@ -1,0 +1,35 @@
+# vim:ft=plumed
+
+# expect bound state
+
+FIT_TO_TEMPLATE STRIDE=1 REFERENCE=./ckit1_tmx_npt_bound_dnaposre_template.pdb TYPE=OPTIMAL
+
+# funnel traps ligand in cylinder above DNA
+# useful for achieving ~50% residence time
+
+# Get the x and y distances (not Cartesian!) between v1 (host "centre") and lig
+# (ligand centre), then construct a radius for the funnel.
+cyl: DISTANCE ATOMS=v1,lig COMPONENTS
+radius: MATHEVAL ARG=cyl.x,cyl.y FUNC=sqrt(x*x+y*y) PERIODIC=NO
+funnel: MATHEVAL ARG=radius,cyl.z VAR=r,z FUNC=(r+0.1*(-1.2+z))*step(-z+1.)+(r+0.2)*step(z-1.) PERIODIC=NO
+# https://www.plumed.org/doc-v2.6/user-doc/html/_u_p_p_e_r__w_a_l_l_s.html
+UPPER_WALLS AT=0   ARG=funnel KAPPA=2000.0       LABEL=funnelwall  #funnel restraint
+UPPER_WALLS AT=1.8 ARG=cyl.z  KAPPA=4000.0 EXP=2 LABEL=upper_wall  #upper limit of cyl.z -- reduce this for more boundness?
+
+METAD ...
+# WALKERS_MPI
+ARG=cyl.z
+# ARG=cyl.z,sw		# once sw is re-implemented
+# BIASFACTOR=12		# only required for well-tempered metaD
+FILE=HILLS
+GRID_MAX=200
+GRID_MIN=-200
+GRID_SPACING=0.1
+# HEIGHT=0.1		# there is no default value, but we generally use 0.1
+HEIGHT=0.1
+LABEL=metad
+PACE=500
+RESTART=NO
+SIGMA=0.1 #,0.1
+TEMP=300
+... METAD

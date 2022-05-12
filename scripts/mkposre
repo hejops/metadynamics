@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	Create posre.itp file to constrain atoms
+EOF
+	exit
+}
+
+[[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+# atoms=$(grep <"$1" -P '2CLP +C' | awk '{print $3}')
+# one posre file for one chain only
+# atoms=$(grep <"$1" -P '(\d+D\w +[CNOP]|RAU)' | awk '{print $3}')
+atoms=$(grep <"$1" -P '\d+D\w +[CNOP]' | awk '{print $3}')
+
+echo "[ position_restraints ]"
+while read -r atom; do
+	echo "$atom 1 50 50 50"
+done <<< "$atoms"
+
+# TODO: .top #include "./posre.itp"
+# TODO: .mdp define = -DPOSRES

@@ -1,0 +1,355 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	Analyse data in a single COLVAR file containing multiple CVs.
+
+	For each CV, three operations are performed:
+		1. Extract raw data based on column (.VALUES)
+		2. Calculate weighted mean and variance (.STATS)
+		3. Calculate weighted FES (.FES, .HISTO)
+
+	MetaD bias essentially flattens the probability distribution of every
+	CV (= promotes full exploration of the global FES). Through
+	reweighting, (= undoing the effect of bias during metaD), the "true"
+	distribution of each CV is restored, allowing energy minima to be
+	revealed.
+
+	(Unlike the DeepLDA fiasco, this should be safe from any column issues,
+	because of manual exclusions)
+
+	This is a terribly hacky script that will (eventually) be rewritten in
+	python, once I have time...
+
+	For more details, refer to
+	https://www.plumed.org/doc-v2.7/user-doc/html/masterclass-21-2.html
+	https://github.com/plumed/masterclass-21-2
+
+EOF
+	exit
+}
+
+[[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+preprocess() {
+
+	# possibly buggy, file gets filled with buggy ^@ s
+
+	COLVAR_PATH=$(realpath "$COLVAR")
+
+	echo "Pre-processing $COLVAR..."
+
+	# i'd have liked to not use realpath/sponge, but awk doesn't have a "follow
+	# symlink" option
+
+	# split lines that somehow got merged
+	sed <"$COLVAR" -r 's|[0-9 ]#|\n#|g' |
+		# discard lines with too few columns
+		# a file with x "main" CVs will have x+7 columns (header x+9)
+		# note: @3 is an actual column!
+		gawk '{ if (NF>='$NUM_COLS') {print} }' |
+		sponge "$COLVAR_PATH"
+}
+
+generate_plumed_commands() {
+
+	# for an obvious performance increase,
+	# only the load entire COLVAR file into memory once,
+	# then prefix vars for every CV with the CV name
+	# timing:
+	# 3m26,266s -- 1 file, 2 CVs, load every time (multiple plumed files/calls)
+	# 1m31,223s -- 1 file, 2 CVs, load once (single plumed file/call)
+	# 1m48,941s -- 1 file, 3 CVs, load once
+	# 5m5,654s -- 1 file, 34 CVs, load once
+	# 52m40,018s -- 1 file, 285 CVs, load once
+	#
+	# STRIDE=1
+	# STATS = 6.2 M
+	# VALUES = 4.47 M
+	# FES, HISTO = ~ 600 B
+
+	CV=$1
+	HISTO=$FES_DIR/$CV.HISTO   # probability distribution of CV, 20 bins
+	FES=$FES_DIR/$CV.FES       # free energy vs CV (graph)
+	STATS=$FES_DIR/$CV.STATS   # mean, var of CV (bar graph)
+	VALUES=$FES_DIR/$CV.VALUES # raw data, for validation (boxplot)
+
+	# TODO: better way to select files, probably based on 1st char of $COLVAR
+	# globbing all plumed files in the dir (*) tends to kill the pipe
+	# realpath $COLVAR
+	CV_DESC=$(grep "$CV" "$REF_PLUMED" | sponge /dev/stdout | head -1)
+	# REF_PLUMED=$(cut <<<"$CV_DESC" -d: -f1)
+	if [[ $CV_DESC == *MATHEVAL* ]]; then
+		# coordination CV has no indices
+		# ideally, show coordinates instead, but because of
+		# non-systematic naming scheme, this is extremely difficult to
+		# achieve
+		# d1 -> L1
+		# d5 -> V1
+		ATOMS=
+		# a1=${CV/d/v}
+		i1= #$(grep -m1 "^$a1:" <"$REF_PLUMED" | cut -d= -f2)
+		i2= #
+	else
+		# TODO: i1/2 for dihedrals potentially meaningless
+		ATOMS=$(grep <<<"$CV_DESC" -Po '[^=,]+,\S+' | tr '\n' ,)
+		a1=$(cut <<<"$ATOMS" -d, -f1)
+		a2=$(cut <<<"$ATOMS" -d, -f2)
+		i1=$(grep -m1 "^${a1%%,*}:" <"$REF_PLUMED" | cut -d= -f2)
+		i2=$(grep -m1 "^${a2%%,*}:" <"$REF_PLUMED" | cut -d= -f2)
+	fi
+
+	# how to use indices? vmd?
+
+	# find out the range of the CV (drop PBC values), then write histogram and fes
+	# again, this is a rather ridiculous workaround to avoid
+	# calling plumed more than once
+	# performance is not bad, 3-5 s / CV
+
+	col=$(grep <<<"$HEADER" ":$CV$" | cut -d: -f1)
+	# select "true" column containing the CV (according to FULL header); again -2 because of #! and FIELDS
+	# note: if range is constrained to ignore large values (PBC), plumed cannot put them in a histogram bin
+
+	if [[ $COLVAR == h* ]]; then
+		# use hardcoded range for dihedrals (-pi, pi)
+		max=3.2
+		min=-3.2
+
+	elif [[ $COLVAR == c* ]]; then
+		max=0.4
+		min=-1
+
+	else
+		# probably a useless regex; after sorting, just remove last line
+		values=$(awk <"$COLVAR" '{print $'$((col - 2))'}' | grep -P '^-?\d+\.' | sort -Vu)
+		# <<< "$values" head
+		# exit
+
+		# no rounding, just truncate
+		min=$(head <<<"$values" -1 | grep -Po '^[^.]+\.\d')
+		max=$(tail <<<"$values" -1 | grep -Po '^[^.]+\.\d')
+		min=$(echo "$min -0.1" | awk '{printf "%f", $1 + $2}' | grep -Po '^[^.]+\.\d')
+		max=$(echo "$max 0.1" | awk '{printf "%f", $1 + $2}' | grep -Po '^[^.]+\.\d')
+
+		# coordination tends to be negative; swap min and max
+		if [[ $min == -* ]] || [[ $max == -* ]]; then
+			x=$min
+			y=$max
+			max=$x
+			min=$y
+			min=$(echo "$min -0.3" | awk '{printf "%f", $1 + $2}' | grep -Po '^[^.]+\.\d')
+			max=$(echo "$max 0.3" | awk '{printf "%f", $1 + $2}' | grep -Po '^[^.]+\.\d')
+			echo >&2 "$min $max"
+		fi
+	fi
+
+	cat <<EOF
+# ===============================================================================
+# CV: $CV [$col/$NUM_COLS]
+# atoms: $ATOMS
+# indices: $i1, $i2
+
+${CV}_data: READ FILE=./$COLVAR VALUES=$CV IGNORE_FORCES IGNORE_TIME
+
+EOF
+
+	# STRIDE must be an integer (min 1)
+	# since the original write frequency is 0.25 (4x/frame),
+	# STRIDE=1 will maintain number of frames/lines, but "increase" the time-scale
+	# the VALUES is mostly just for reference
+
+	cat <<EOF
+PRINT ARG=${CV}_data STRIDE=1 FILE=./$VALUES
+
+EOF
+
+	# changing AT and KAPPA don't seem to do anything
+	# AT should represent the mean value of the distribution
+	# KAPPA = restraint is harmonic and what the values of the force constants on each of the variables are; leave default?
+	# TODO: REWEIGHT_BIAS is getting "influenced" by previous args!
+
+	cat <<EOF
+${CV}_restraint: RESTRAINT ARG=${CV}_data AT=0.6 KAPPA=0
+${CV}_r_wt: REWEIGHT_BIAS TEMP=1
+
+EOF
+
+	# mean and variance of CV over time
+	# this is just a new COLVAR, not a HILLS
+	# TODO: find a way to use variance_wt (error bar) in FES
+	# we use STRIDE=4 to reduce calculation time (i guess)
+
+	cat <<EOF
+${CV}_mean_wt: AVERAGE ARG=${CV}_data STRIDE=4 LOGWEIGHTS=${CV}_r_wt
+${CV}_X_minus_mean_sq: CUSTOM ARG=${CV}_data,${CV}_mean_wt FUNC=(x-y)*(x-y) PERIODIC=NO
+${CV}_variance: AVERAGE ARG=${CV}_X_minus_mean_sq STRIDE=4 LOGWEIGHTS=${CV}_r_wt NORMALIZATION=false
+${CV}_one: CONSTANT VALUE=1
+${CV}_weight_sum: AVERAGE ARG=${CV}_one STRIDE=4 LOGWEIGHTS=${CV}_r_wt NORMALIZATION=false
+${CV}_variance_wt: CUSTOM ARG=${CV}_variance,${CV}_weight_sum FUNC=x/(y-1) PERIODIC=NO
+PRINT ARG=${CV}_mean_wt,${CV}_variance_wt STRIDE=4 FILE=./$STATS
+
+EOF
+
+	# NORMALIZATION just does some slight y-scaling
+	# 200 bins!
+
+	cat <<EOF
+${CV}_histogram: HISTOGRAM ARG=${CV}_data LOGWEIGHTS=${CV}_r_wt GRID_MIN=$min GRID_MAX=$max GRID_BIN=200 CLEAR=0 NORMALIZATION=true KERNEL=DISCRETE
+DUMPGRID GRID=${CV}_histogram FILE=./$HISTO
+
+${CV}_fes: CONVERT_TO_FES GRID=${CV}_histogram TEMP=1
+DUMPGRID GRID=${CV}_fes FILE=./$FES
+
+EOF
+
+}
+
+clean_fes() {
+	for f in "$FES_DIR"/*FES; do
+		sed -i -r '
+	/^ .+inf$/ s|(.+)|# \1|g
+	s|^(# )+|# |g
+		' "$f"
+		echo "Cleaned $f"
+	done
+}
+
+if [[ $1 == *.COLVAR ]]; then
+	COLVAR=$1
+	base=${1/.COLVAR/}
+else
+	base=$1
+	COLVAR=$base.COLVAR
+fi
+
+FES_DIR=${COLVAR/.COLVAR/}
+# METAD_DIR="/scratch/$(whoami)/metad_torch/" #plumed*1.dat
+# METAD_DIR="/scratch/$(whoami)/deeplda_until_2021-12-13/metad_torch"
+METAD_DIR="../metad_torch"
+
+case ${base::1} in
+c) REF_PLUMED=$METAD_DIR/plumed_ckit_coord_metad_${base}.dat ;;
+d) REF_PLUMED=$METAD_DIR/plumed_ckit_dist_metad_${base}.dat ;;
+s) REF_PLUMED=$METAD_DIR/plumed_ckit_stack_metad_${base}.dat ;;
+S) REF_PLUMED=$METAD_DIR/plumed_ckit_stack22_metad_${base}.dat ;;
+h) REF_PLUMED=$METAD_DIR/plumed_ckit_dihedral_metad_${base}.dat ;;
+a) REF_PLUMED=$METAD_DIR/plumed_ckit_all_${base}.dat ;;
+k) REF_PLUMED="$(dirname "$(realpath "$COLVAR")")"/plumed_ckit_all_metad.dat ;;
+*)
+	echo "No suitable PLUMED file"
+	exit
+	;;
+esac
+
+if [[ $# -eq 2 ]]; then
+	# while IFS=, read... is unreliable
+	CVs=$(tr <<<"$2" "," '\n')
+
+else
+	# elif [[ $1 == k* ]]; then
+	# get CVs from header of COLVAR file
+	# exclusions are tedious, but relying solely on header does away with DeepLDA dependency
+	CVs=$(head <"$COLVAR" -n1 |
+		tr ' ' '\n' |
+		sed -r '
+
+			/#/d
+			/@/d
+			/FIELDS/d
+			/L/d
+			/V/d
+			/ene/d
+			/metad/d
+			/s.node/d
+			/sw/d
+			/time/d
+
+			')
+
+	# echo "$CVs"
+	# exit
+
+	# this file is only used to get CV description
+	# REF_PLUMED="$(dirname "$(realpath "$COLVAR")")/plumed_ckit_all_metad.dat"
+	# tail "$REF_PLUMED"
+	# exit
+
+# else
+# 	# select top-ranked CVs from deeplda output
+# 	# TODO: also include important CVs that should always be analysed
+# 	# CVs=$(grep -Ph ',(0\.[89]|1\.0)' "/scratch/$(whoami)/colvar/"${COLVAR::1}*csv | cut -d, -f2 | sort -Vu)
+# 	# TODO: there is actually no need to look in this dir; instead, just grep $COLVAR appropriately?
+# 	CVs=$(cut -d, -f2 "/scratch/$(whoami)/colvar/"${COLVAR::1}*csv | sort -Vu)
+
+fi
+
+NUM_CVs=$(wc <<<"$CVs" -l)
+echo "Found $NUM_CVs CVs"
+
+# full header, for determining range later in main loop
+HEADER=$(head -n1 <"$COLVAR" | tr -s ' ' '\n' | grep -n .)
+
+# ignore #! and FIELDS, include everything else (@3)
+NUM_COLS=$(echo "$(wc <<<"$HEADER" -l) - 2" | bc)
+
+# preprocess
+
+if [[ -d "$FES_DIR" ]]; then
+	num_files=$(find "$FES_DIR" -type f | wc -l)
+	if [[ $((num_files - 1)) -ge $((NUM_CVs * 4)) ]]; then
+		echo "Already processed"
+		clean_fes
+		exit 1
+	else
+		rm -rfvI "$FES_DIR"
+	fi
+fi
+
+mkdir -p "$FES_DIR"
+
+PLUMED=$FES_DIR/plumed.dat
+
+if [[ $(grep <"$PLUMED" "# CV:") -ne $NUM_COLS ]]; then
+
+	# UNITS must appear at start, and only once
+	echo "UNITS NATURAL" >"$PLUMED"
+
+	# i=0
+	while read -r CV; do
+		# i=$((i += 1))
+		echo >&2 "Generating plumed commands for $CV..."
+		generate_plumed_commands "$CV" >>"$PLUMED"
+	done <<<"$CVs"
+
+	plumed driver --noatoms --plumed $PLUMED #|| echo $?
+
+	# exit 127 == cmd not found, which means script got mangled after plumed
+	[[ $? -eq 134 ]] && :
+
+fi
+
+clean_fes
+
+# sponge?
+# {loop} > FILE possibly causes too much text to be held in memory, mangling the subsequent commands?
+
+# exit
+
+# plumed generates all STATS and VALUES files first, filling up each one gradually
+# FES and HISTO are generated last
+# typically limited to 1 core
+# note that the size of the resulting data is dramatically larger than the input
+
+echo "Done: $COLVAR ($SECONDS s)"
+notify-send "Done: $COLVAR ($SECONDS s)"
+
+# TODO: for each FES, get dG (max y - min y); this should correspond to STATS mean (mean is more precise)
+# TODO: sum hills (involves summing dG over multiple CVs)
+
+# TODO: get frame (/frame range) where the specific CV is at the min (= STATS mean), then compile/rank list of frames
+# OR, get frame where the dG is min (according to sw), then list out all CVs/dGs at that frame
+
+# TODO: average CVs/dGs ACROSS simulations

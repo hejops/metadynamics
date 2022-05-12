@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	Resume a mdrun that has died
+EOF
+	exit
+}
+
+[[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+base=$1
+case ${base::1} in
+c) plumed=plumed_ckit_coord_metad_${base}.dat ;;
+d) plumed=plumed_ckit_dist_metad_${base}.dat ;;
+s) plumed=plumed_ckit_stack_metad_${base}.dat ;;
+h) plumed=plumed_ckit_dihedral_metad_${base}.dat ;;
+esac
+
+mtime=$(stat -c %Y "$base.log")
+now=$(date +%s)
+if [[ $((now - mtime)) -lt 120 ]]; then
+	echo "Still running: $base"
+	exit
+fi
+
+killjob $base
+
+GPU=1
+
+# gmx_mpi usage, in %
+# https://stackoverflow.com/a/14885734
+CPUS_USED=$(ps -C "gmx_mpi" -o pcpu= | awk '{s+=$1}END{print s}')
+
+# use at most 3x12 cores, else 8
+if [[ $CPUS_USED -gt 3600 ]]; then
+	CPUS=12
+else
+	CPUS=8
+fi
+
+# until [[ $? -eq 0 ]]; do
+until gmx_mpi mdrun -v -plumed $plumed -deffnm $base -gpu_id $GPU -ntomp $CPUS -pin auto -cpi $base.cpt; do
+	echo "Retrying..."
+	sleep 5
+done
+
+echo "Finished successfully: $base, $SECONDS s"

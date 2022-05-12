@@ -1,0 +1,334 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	
+	Make local GROMACS jobs in /scratch/$(whoami)
+	Currently defaults to 5 pre-LDA runs
+
+	TODO: pass in args instead of using fzf
+EOF
+	exit
+}
+
+[[ ${1:-} = --help ]] && usage
+
+MDP=
+while getopts "m" opt; do
+	case ${opt} in
+	m) MDP=$OPTARG ;;
+	# <++>) <++> ;;
+	# <++>) <++> ;;
+	\?) usage ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+select_file() {
+	ext=$1
+	if [[ $ext == plumed ]]; then
+		pat="$ext*"
+		result=$(find -L * -name "$pat" -print | grep -Pv '_[bu][_.]')
+	elif [[ $ext == bias ]]; then
+		result=$(find -L * -name "*bias*" -print)
+	else
+		pat="*.$ext"
+		result=$(find -L * -name "$pat" -print)
+	fi
+
+	if [[ -z "$result" ]]; then
+		echo >&2 "No $ext files in current dir!"
+		exit 1
+	elif [[ $(wc <<<"$result" -l) -gt 1 ]]; then
+		# TODO: selecting a bias is optional; edit prompt accordingly
+		fzf <<<"$result" --prompt="Choose $ext file"
+	else
+		echo "$result"
+	fi
+}
+
+NAME=$(basename "$(pwd)")
+
+GRO=$(select_file gro)
+
+Au_Z=$(grep <"$GRO" ' AU ' | awk '{print $6}' | tr -d .)
+K_Z=$(grep <"$GRO" ' K ' | head -n1 | awk '{print $6}' | tr -d .)
+K_Au_dist=$(echo "$K_Z - $Au_Z" | bc | tr -d -)
+
+# currently based on z-dist, Euclidean would be more robust
+if [[ $K_Au_dist -gt 1000 ]]; then
+	# if [[ $(pwd) == *_unbound ]]; then
+	FORM=u
+	NAME=${NAME}_unbound
+	notify-send "Unbound gro detected"
+else
+	FORM=b
+	NAME=${NAME}_bound
+fi
+
+# for some unknown reason, unbound .gro has 2 less water molecules than bound .gro
+# edit .top file accordingly
+
+TOP=$(select_file top)
+N_SOL=$(grep <"$GRO" -c SOL)
+N_SOL=$(echo "$N_SOL / 3" | bc)
+sed -i -r "/SOL/ s|[0-9]+|$N_SOL|" "$TOP"
+
+MDP=$(select_file mdp)
+PLU=$(select_file plumed)
+
+# for modularity, base and bias plumed files are decoupled
+# base plumed file contains only CV definitions, which remain constant
+# bias plumed file contains only template and bias, which vary greatly, both before and after LDA
+# TODO: does PRINT in included file create a new COLVAR column (sw) correctly?
+
+# not all base files have the INCLUDE line (yet)
+# this check will eventually be removed
+if ! grep <"$PLU" -q INCLUDE; then
+	echo "$PLU does not contain an INCLUDE statement!"
+	exit
+fi
+
+# ensure first virtual atom matches K715 in gro
+if grep <"$PLU" -q FIXEDATOM; then
+	FIXED1=$(grep <"$PLU" -Pm1 '^[^#]+FIXEDATOM' |
+		cut -d= -f2 |
+		sed -r 's|0,| +|g; s|0$||g')
+	if ! grep <"$GRO" -Pq "$FIXED1"; then
+		echo "Coordinates of first virtual atom do not correspond to K 715 of $GRO"
+		exit 1
+	fi
+fi
+
+# both bound and unbound states can have bias
+INCLUDE=
+if BIAS=$(select_file bias); then
+	INCLUDE=1
+	BIAS_BASE=${BIAS%.*}
+fi
+
+# NOTE: gdesmond does not allow sharing of GPUs, i.e. when a GPU is being used
+# by gdesmond, nothing else can run on it
+if [[ $(hostname) == artemis ]]; then
+
+	# only 1 GPU
+	GPU=0
+
+	while
+		# NUM_REPEATS=3
+		# with ntomp 8, real usage is more like 6.6 cores
+		# M-cycles starts to degrade once ~40 cores are in use
+		CPUS_USED=$(ps -C "gmx_mpi" -o pcpu= | awk '{s+=$1}END{print s}')
+		[[ $CPUS_USED -gt 4000 ]]
+	do
+		echo "Waiting for free CPUs..."
+		sleep 15m
+	done
+
+elif [[ $(nvidia-smi | grep -q ' C +.+gdesmond') -ge 2 ]]; then
+	read -r -p "Both GPUs in use. Specify GPU for scheduled run: " GPU </dev/tty
+elif nvidia-smi | grep -P '0.+gmx_mpi'; then
+	GPU=1
+else
+	GPU=0
+fi
+
+PLU_BASE=${PLU%.*}
+CV=$(awk <<<"$PLU_BASE" -F_ '{print $NF}')
+
+# TODO: more sanity checks
+
+# TODO: NUM_REPEATS?
+TARGET="$(date -I)_${NAME}_${CV}"
+
+# manually set suffix
+# read -r -p "Suffix: " SUFFIX </dev/tty
+# [[ -n $SUFFIX ]] && TARGET=${TARGET}_${SUFFIX}
+
+# POSRE=0
+
+constrain() {
+	notify-send "Applying DPOSRES constraints to DNA"
+
+	# only constrain DNA, don't constrain ligand
+	# posre_.itp files are already modified, but disabled by default in .top
+	# DPOSRES is defined in posre_.itp
+	#
+	# editing .top is not recommended as each chain has its own indexing,
+	# unlike the .gro, where all chains are listed sequentially
+	#
+	# probably can list multiple files to sed
+	sed -i -r '/DPOSRE/ s|^(; )*||g' "$MDP"
+
+	sed -i -r "/CONSTRAIN DNA/ s|^(; )*||g" ./topol_DNA_chain_X.itp
+
+	# this is only ever needed for unbound NPT
+	# sed -i -r "/CONSTRAIN LIG/ s|^(; )+||g" ./topol_Other_chain_B.itp
+
+	# exit
+}
+
+# comment out DNA and ligand constraints by default
+sed -i -r '/DPOSRE/ s|^(; )*|; |g' "$MDP"
+sed -i -r "/CONSTRAIN DNA/ s|^(; )*|; |g" ./topol_DNA_chain_X.itp
+sed -i -r "/CONSTRAIN LIG/ s|^(; )*|; |g" ./topol_Other_chain_B.itp
+
+# always constrain DNA, even after LDA!
+constrain
+
+# set dirname of job
+# contains: (un)bound, CV type (dsch), bias
+if grep <"$BIAS" -Pq '^funnel'; then
+
+	# if funnel active, it is assumed to be the bias
+	# dirname will contain funnel params
+	notify-send "Funnel detected"
+	echo "Funnel detected"
+	SUFFIX=$(grep <"$BIAS" ^funnel | grep -Po -- '-?[0-9.]{3,}' | tr '\n' ,)
+	TARGET=${TARGET}_funnel=${SUFFIX::-1}
+
+elif grep <"$BIAS" -q ^METAD; then
+
+	# any other bias(es) (usually K-Au)
+	CV=$(grep <"$BIAS" ^ARG | cut -d= -f2 | awk '{print $1}')
+	HEIGHT=$(grep <"$BIAS" ^HEIGHT | cut -d= -f2)
+	SUFFIX="${CV}=$HEIGHT"
+	TARGET=${TARGET}_${SUFFIX}
+
+else
+	# no bias = bound
+	TARGET="${TARGET}_nobias"
+fi
+
+# TODO: some job number equivalent; probably pid
+
+# BASE=${GRO%.*}
+# TODO: replace npt with ... something
+BASE=$(grep <<<"$GRO" -Po '^.+(em100|npt)')
+
+OUTNAME=${BASE}_${FORM}
+MULTI=1
+
+# if [[ $(hostname) == oceanids ]]; then
+# 	scratch=/scratch/$(whoami)/local_tests
+# elif [[ $(hostname) == artemis ]]; then
+# 	scratch=/scratch/$(whoami)/npt
+# fi
+
+# TODO: different dir for post-LDA metaD; based on bias file
+scratch=/scratch/$(whoami)/npt
+
+mkdir -p "$scratch/$TARGET"
+
+# TODO: list files explicitly, not glob
+rsync -vLau ./* "$scratch/$TARGET"
+
+# cat "$scratch/$TARGET/run.sh"
+# exit
+
+cd "$scratch/$TARGET"
+
+# to avoid unnecessary changes to plumed files,
+# all modifications are performed after changing dir
+
+generate_gmx_commands() {
+	# double backslash required
+	# https://unix.stackexchange.com/questions/399488/keep-backslash-and-linebreak-with-eof#comment713403_399488
+	# OUTNAME=$1
+	cat <<EOF
+gmx_mpi grompp \\
+	-maxwarn 999 \\
+	-p "$TOP" \\
+	-c "$GRO" \\
+	-r "$GRO" \\
+	-f "$MDP" \\
+	-o "$1.tpr"
+gmx_mpi mdrun \\
+	-v \\
+	-deffnm "$1" \\
+	-plumed "${PLU_BASE}_${FORM}${i}.dat" \\
+	-gpu_id "$GPU" \\
+	-ntomp 8 \\
+	-nb gpu \\
+	-pme gpu # -npme 1
+
+EOF
+}
+
+{
+	cat <<EOF
+#!/bin/bash -e
+
+EOF
+
+	# modify INCLUDE line in PLU
+	# modify HILLS line in BIAS
+	# sed "
+	# s/COLVAR/all.COLVAR/g
+	# s/.HILLS/K_Au.HILLS/g
+	# " "$PLU" >"${PLU_BASE}_${FORM}.dat"
+
+	# TODO: only 3 repeats for post-LDA (again, based on bias)
+	# use seq
+	for i in {1..5}; do
+
+		# generate 5 plumed files (..._[bu][1-5])
+		# each with different COLVAR outnames
+
+		if [[ -n $INCLUDE ]]; then
+			# modify COLVAR outname, include the bias file
+			BIAS_NUM=${BIAS_BASE}_${FORM}${i}.dat
+			sed "
+				s/COLVAR/COLVAR_${FORM}${i}/g
+				/INCLUDE/ s/FILE=/FILE=$BIAS_NUM/g
+				" "$PLU" >"${PLU_BASE}_${FORM}${i}.dat"
+
+			# the included file only has HILLS
+			sed "
+				s/HILLS/HILLS_${FORM}${i}/g
+				" "$BIAS" >"$BIAS_NUM"
+		else
+			# modify COLVAR outname, comment out INCLUDE line
+			sed "
+				s/COLVAR/COLVAR_${FORM}${i}/g
+				/INCLUDE/ s/^/# /g
+				" "$PLU" >"${PLU_BASE}_${FORM}${i}.dat"
+
+		fi
+
+		# actually provide the plumed file to gmx
+		generate_gmx_commands "${OUTNAME}${i}"
+	done
+	else
+	# single run not re-enabled yet
+	exit
+	# sed "s/COLVAR/COLVAR_${FORM}/g" "$PLU" >"${PLU_BASE}_${FORM}.dat"
+	# generate_gmx_commands "${OUTNAME}"
+
+	cat <<EOF
+# Base plumed file: ${PLU_BASE}
+EOF
+
+} >run.sh
+
+chmod +x run.sh
+
+./run.sh || :
+
+cat <<EOF
+dir $TARGET
+top $TOP
+mdp $MDP
+plu $PLU
+EOF
+
+diagnose
+
+# -pin on not necessary
+# gmx_mpi mdrun -v -deffnm ckit1_tmx_em100_b -plumed plumed_ckit_stack.dat -ntomp 12 -gpu_id 0 -nb gpu -pme gpu
+# NOTE: The number of threads is not equal to the number of (logical) cores
+#       and the -pin option is set to auto: will not pin threads to cores.
+#       This can lead to significant performance degradation.
+#       Consider using -pin on (and -pinoffset in case you run multiple jobs).

@@ -1,0 +1,48 @@
+# http://www.gnuplot.info/demo/surface1.html
+# http://gnuplot.sourceforge.net/docs_4.2/node154.html
+# config file: $HOME/.gnuplot
+# https://github.com/gnuplot/gnuplot/blob/master/share/gnuplotrc
+
+# produces a static contour; linux doesn't seem to have interactive
+
+# variables are declared python style
+FONT = "Helvetica, 32"
+
+set cntrparam levels 10
+set contour
+set encoding utf8		# allows angstrom without stupid escapes
+set isosamples 10,200
+set key at screen 0.89,0.86
+set key vertical maxrows 1 font FONT
+set object 1 rectangle from screen 0,0 to screen 1,1 fillcolor rgb'white' behind
+set palette rgbformulae 22,13,10
+set pm3d map
+set samples 200,10
+set samples 200,100		# why twice?
+set title 'motif\_1 ps test' font FONT
+
+# large ranges (e.g. 0:100) produce noticeable slowdown
+set xrange [0:40]
+set yrange [0:40]
+
+# set tics ", 12"		# increment must be positive
+# set tics "1"			# removing the comma appears to fix it
+set xtics font FONT
+set ytics font FONT
+
+set xlabel "d1 / Å" font FONT	# 305 is supposed to be angstrom, but doesn't seem to work
+set ylabel "at screen 0.15,0.5"
+set ylabel "d2 / Å" font FONT
+
+# set xtics 0,2,40
+# set ytics 0,2,40
+
+set size 1, 1
+set term png size 600, 400
+
+set term png enhanced
+set term png enhanced size 3840,2160 font FONT
+
+set output 'foo.png'
+
+splot 'foo.dat'

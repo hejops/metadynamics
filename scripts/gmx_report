@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+	cat <<EOF
+Usage: $(basename "$0") [options]
+	
+EOF
+	exit
+}
+
+# [[ $# -eq 0 ]] && usage
+# [[ ${1:-} = --help ]] && usage
+
+# while getopts "<++>" opt; do
+# 	case ${opt} in
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	<++>) <++> ;;
+# 	\?) usage ;;
+# 	esac
+# done
+# shift $((OPTIND - 1))
+
+# TODO: if no log files in current dir, cd to appropriate dir and run on every dir
+
+N=$(grep <run.sh -c mdrun)
+M=$(find *log | wc -l)
+
+# if writing to file, default to 80
+COLS=$(tput cols)
+SEP=$(for i in $(seq 1 "$COLS"); do echo -n '#'; done)
+
+restraints() {
+	if ! tail ./topol*itp | grep -P '^#include'; then
+		echo "No restraints were applied"
+	else
+		:
+	fi
+}
+
+simtime() {
+	grep <mdout.mdp ^nsteps
+	grep <mdout.mdp ^dt
+	# < mdout.mdp grep ^gen_vel
+	# TODO: calc actual time (ns)
+}
+
+bias() {
+	# TODO: check if plumed v1 coords matches gro
+
+	# limit plumed to first repeat, i.e. [bu]1.dat
+	# obviously this breaks down if filename unquoted
+	PLU=$(grep <run.sh -- '-plumed' | cut -d'"' -f2 | head -n1)
+	BIAS=$(grep <"$PLU" ^INCLUDE | cut -d'=' -f2)
+	if grep -q ^METAD "$BIAS"; then
+		grep ^funnel "$BIAS" ||
+			# TODO: remove first and last lines
+			sed -rn '/^METAD/,/METAD$/p' "$BIAS"
+	else
+		echo "No bias"
+	fi
+
+}
+
+cat <<EOF
+$SEP
+$(pwd)
+$N runs scheduled (currently running #$M)
+$SEP
+$(restraints)
+$(simtime)
+$SEP
+$(bias)
+$SEP
+EOF
